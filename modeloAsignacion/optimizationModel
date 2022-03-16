@@ -1,0 +1,325 @@
+
+@author: Jose Antonio Taquia Gutierrez
+based on the work
+https://www.osti.gov/servlets/purl/1617839
+"""
+from itertools import product
+from math import sqrt
+import pandas as pd
+from pandas import DataFrame
+import numpy as np
+import gurobipy as gp
+from gurobipy import GRB
+import haversine as hs
+import os
+from geopy.distance import geodesic
+
+
+def compute_distance(loc1, loc2):
+    
+    
+    valor=geodesic(loc1, loc2).kilometers    
+    
+    return valor
+
+def solve_sjl_logisticaHumanitaria(c_coordinates, demand,m,n): 
+
+    #####################################################
+    #                    Data
+    #####################################################
+    
+    # Indices for the counties
+    counties = [*range(1,m+1)]
+    
+    # Indices for the facilities
+    facilities = [*range(1,n+3)]
+    print("el indice de Localidades de atencion es :", facilities)
+    
+    
+    #########################################################
+    # aqui construir este diccionario A
+    #########################################################
+    
+    
+    
+    df100=pd.read_excel('geolocalizacionAsignacion7Centros.xlsx')
+    dicc=list()
+    for x in range(n):
+        b5=[df100.iloc[x]['lat'],df100.iloc[x]['lng']]
+        b5=tuple(b5)
+        dicc.append(b5)
+    #dicc
+    #secuencia=[1,2,3,4]
+    k=n+1
+    numbers = range(1, k)
+    secuencia = [number for number in numbers]
+    print("la secuencia es :" , secuencia)
+    # Create a zip object from two lists
+    zipbObj = zip(secuencia, dicc)
+    # Create a dictionary from zip object
+    diccionarioA = dict(zipbObj)
+    #diccionarioA
+    from collections import defaultdict
+    d1 = diccionarioA
+    
+    
+    dicc2=list()
+    for x in range(n):
+        b=df100.iloc[x]['kits']
+        dicc2.append(b)  
+    # Create a zip object from two lists
+    zipbObj2 = zip(secuencia, dicc2)
+    # Create a dictionary from zip object
+    diccionarioB = dict(zipbObj2)
+    d2 = diccionarioB  
+    dd = defaultdict(list)
+    for d in (d1, d2): 
+        for key, value in d.items():
+            dd[key].append(value)
+    
+    
+    existing, e_coordinates, e_capacity  = gp.multidict(dd)
+    
+    
+    
+    
+    temporary, t_coordinates, t_capacity  = gp.multidict({
+        n+1: [(-12.0194141,-76.9526184), 0],
+        n+2: [(-12.0186654,-76.9522931), 0]
+    })
+    
+    # Cost of delivering
+    dcost = 1000
+    
+    # Cost of building a temporary facility with capacity of 100 COVID-19
+    tfcost = 500000
+    
+    # Compute key parameters of MIP model formulation
+    f_coordinates = {}
+    for e in existing:
+        f_coordinates[e] = e_coordinates[e]
+    
+    for t in temporary:
+        f_coordinates[t] = t_coordinates[t]
+    
+    # Cartesian product of counties and facilities
+    cf = []
+    
+    for c in counties:
+        for f in facilities:
+            tp = c,f
+            cf.append(tp)
+        
+    # Compute distances between counties centroids and facility locations
+    distance = {(c,f): compute_distance(c_coordinates[c], f_coordinates[f]) for c, f in cf}
+    df = pd.DataFrame(data=distance, index=[0])
+    df = (df.T)
+    #df.to_excel('Distancia1.xlsx', sheet_name='sheet1')#, index=False)
+    
+    
+    #####################################################
+    #                    MIP Model Formulation
+    #####################################################
+    
+    m = gp.Model('logisticaHumanitariaSJL')
+    
+    # Build temporary facility
+    y = m.addVars(temporary, vtype=GRB.BINARY, name='temporary')
+    
+    # Assign COVID-19 patients of county to facility
+    x = m.addVars(cf, vtype=GRB.INTEGER, name='Assign')
+    
+    # Add capacity to temporary facilities
+    z = m.addVars(temporary, vtype=GRB.INTEGER, name='addCap' )
+    
+    # Objective function: Minimize total distance to drive to a COVID-19 facility
+    
+    # Big penalty for adding capacity at a temporary facility
+    bigM = 1e9
+    
+    m.setObjective(gp.quicksum(dcost*distance[c,f]*x[c,f] for c,f in cf) 
+                   + tfcost*y.sum()
+                   + bigM*z.sum(), GRB.MINIMIZE)
+    
+    # Counties demand constraints
+    demandConstrs = m.addConstrs((gp.quicksum(x[c,f] for f in facilities) == demand[c] for c in counties), 
+                                 name='demandConstrs')
+    
+    # Existing facilities capacity constraints
+    existingCapConstrs = m.addConstrs((gp.quicksum(x[c,e]  for c in counties) <= e_capacity[e] for e in existing ), 
+                                      name='existingCapConstrs')
+    
+    # temporary facilities capacity constraints
+    temporaryCapConstrs = m.addConstrs((gp.quicksum(x[c,t]  for c in counties) -z[t] 
+                                        <= t_capacity[t]*y[t] for t in temporary ),
+                                       name='temporaryCapConstrs')
+    # Run optimization engine
+    m.optimize()
+    
+    #####################################################
+    #                    Output Reports
+    #####################################################
+    
+    # Total cost of building temporary facility locations
+    temporary_facility_cost = 0
+    
+    print(f"\n\n_____________Optimal costs______________________")
+    
+
+    for t in temporary:
+        if (y[t].x > 0.5):
+            temporary_facility_cost += tfcost*round(y[t].x)
+
+    
+    patient_allocation_cost = 0
+    for c,f in cf:
+        if x[c,f].x > 1e-6:
+            patient_allocation_cost += dcost*round(distance[c,f]*x[c,f].x)
+            
+    print(f"El costo total de implementar centros de respuesta temporal ante la emergencia es ${temporary_facility_cost:,}") 
+    print(f"El costo total de implementar en los centros ya establecidos para ese fin es ${patient_allocation_cost:,}")  
+    
+    # Build temporary facility at location
+    
+    print(f"\n_____________Plan para centros de respuesta temporal______________________")
+    temporalesA={}
+    
+    for t in temporary:
+        if (y[t].x > 0.5):
+            temporalesA.update({t:1})        
+            
+            print(f"Se requiere implementar un centro temporal de atención en {t}")
+    
+    
+    # Extra capacity at temporary facilities
+    
+    
+    cf3 = []
+    
+    print(f"\n_____________Plan para incrementar la capacidad en centros de respuesta temporales______________________")
+    for t in temporary:
+        if (z[t].x > 1e-6):
+            tp3= t,round(z[t].x)
+            cf3.append(tp3)
+            print(f"Incrementar la capacidad del centro de atencion temporal en la ubicacion {t} con {round(z[t].x)} kits de ayuda")
+    dfcf3=pd.DataFrame(data=cf3)
+
+    dfcf3=dfcf3.T
+    
+
+# Demand satisfied at each facility
+    f_demand = {}
+    cf4 = []
+    print(f"\n_____________Asignación de los danmificados  en el centro de atención ______________________")
+    for f in facilities:
+        temp = 0
+        for c in counties:
+            allocation = round(x[c,f].x)
+            if allocation > 0:
+                tp4= allocation,c,f
+                cf4.append(tp4)
+                print(f"{allocation} Los danmificados del sector {c} deben ser asignados al centro de apoyo {f} ")
+            temp += allocation
+        f_demand[f] = temp
+        #print(f"{temp} es el total de danmificados atendidos en el centro de apoyo {f}. ")
+        print(f"\n________________________________________________________________________________")
+        dfcf4=pd.DataFrame(data=cf4)
+        #dfcf4=dfcf4.T
+        dfcf4.to_excel('respuestaLogistica.xlsx', sheet_name='sheet1')#, index=False)
+        
+        
+    
+    
+    cf2 = []
+    
+    for c in counties:
+        for f in facilities:
+            tp = c,f
+            cf2.append(tp)
+        
+    # Compute distances between counties centroids and facility locations
+    
+    #############################################
+    
+    #asigna = {(c,f):compute_distance(c_coordinates[c], f_coordinates[f]) for c, f in cf2}
+    
+    
+    asigna = {(f,c):compute_distance(c_coordinates[c], f_coordinates[f]) for c, f in cf2}
+    dfasigna = pd.DataFrame(data=asigna, index=[0])
+    
+    
+    
+    # Test total demand = total demand satisfied by facilities
+    total_demand = 0
+    
+    for c in counties:
+        total_demand += demand[c]
+        
+    demand_satisfied = 0
+    for f in facilities:
+        demand_satisfied += f_demand[f]
+        
+    nivel_servicio = demand_satisfied/total_demand*100
+    
+    print(f"\n_____________Balance requerimiento = centros atención______________________")
+    print(f"El total de la demanda de kits requerido de ayuda es: {total_demand:,} kits")
+    print(f"El total de la demanda de kits de ayuda entregada es: {demand_satisfied:,} kits")
+    print(f"La proporción de la demanda de kits atendida entregada es: {nivel_servicio:,} %")
+    
+    return dfasigna,dfcf4
+    
+
+def crea_demanda(m,n):
+    
+    # m : es la cantidad sectores donde se debe ayudar
+    
+    df=pd.read_excel('dataHuaycolor3.xlsx', sheet_name='Aid kits coverage')
+    dicc=list()
+    for x in range(m):
+        b5=[df.iloc[x]['latitude'],df.iloc[x]['longitude']]
+        b5=tuple(b5)
+        dicc.append(b5)
+    dicc
+    
+    
+    k=m+1
+    numbers = range(1, k)
+    secuencia = [number for number in numbers]
+   
+    zipbObj = zip(secuencia, dicc)
+    # Create a dictionary from zip object
+    diccionarioA = dict(zipbObj)
+    #print(diccionarioA)
+
+    from collections import defaultdict
+    d1 = diccionarioA
+     
+    dicc2=list()
+    for x in range(m):
+        b=df.iloc[x]['requerimiento']
+        dicc2.append(b)  
+    # Create a zip object from two lists
+    zipbObj2 = zip(secuencia, dicc2)
+    # Create a dictionary from zip object
+    diccionarioB = dict(zipbObj2)
+    d2 = diccionarioB
+    
+    dd = defaultdict(list)
+    for d in (d1, d2): # you can list as many input dicts as you want here
+        for key, value in d.items():
+            dd[key].append(value)
+            #print(dd[key])
+    
+    
+    counties, coordinates, forecast  = gp.multidict(dd)
+    dfasigna,dfcf4= solve_sjl_logisticaHumanitaria(coordinates, forecast,m,n)
+    
+    return dfasigna,dfcf4
+
+
+
+
+
+m=4101  #: m:sectores
+n=3   #  n: centros atencion
+resultados=crea_demanda(m,n)
