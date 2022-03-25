@@ -1,2 +1,2 @@
 # HumanitarianlogisticResponse
-The purpose of our study was to show how geo-referenced technology in combination with optimization techniques improves the design of a humanitarian logistics response
+Here you can acces script code in Python and R to replicate optimization assign algorith using Gurobipy optimizer.
